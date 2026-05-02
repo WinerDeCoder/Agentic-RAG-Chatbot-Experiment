@@ -9,7 +9,7 @@ from mlflow.entities import SpanType
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
-from agentic_core.utils import (
+from utils import (
     build_execution_task_prompt,
     build_plan_execute_runnables,
     extract_last_message_text,

@@ -18,8 +18,7 @@ from tools import get_query_qdrant_tool, get_search_web_tool
 
 
 UTILS_DIR = Path(__file__).resolve().parent
-CORE_DIR = UTILS_DIR.parent
-BACKEND_DIR = CORE_DIR.parent
+BACKEND_DIR = UTILS_DIR.parent
 load_dotenv(BACKEND_DIR / '.env')
 
 
