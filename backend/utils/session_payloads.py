@@ -22,5 +22,17 @@ def build_session_response_payload(record: SessionRecord) -> dict[str, Any]:
     return record.to_dict()
 
 
-def build_completed_steps_payload(past_steps: list[tuple[str, str]]) -> list[dict[str, str]]:
-    return [{'step': step, 'result': result} for step, result in past_steps]
+def build_completed_steps_payload(plans: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    completed: list[dict[str, Any]] = []
+    for plan in plans:
+        for step in plan.get('steps', []):
+            if step.get('status') == 'done':
+                completed.append(
+                    {
+                        'plan_version': plan.get('version'),
+                        'step_id': step.get('step_id'),
+                        'title': step.get('title'),
+                        'detail': step.get('detail'),
+                    }
+                )
+    return completed

@@ -214,8 +214,17 @@ def query_qdrant(
 
     Supported metadata filter values:
     - scalar exact match: `{'folder_name': 'MyDoc'}`
+    - scalar exact match by document: `{'document_name': 'HS_OR09_Key_HS_Principles_v1'}`
     - list match-any: `{'page_number': [1, 2, 3]}`
     - numeric range: `{'page_number': {'gte': 3, 'lte': 7}}`
+
+    Common payload fields available for filtering:
+    - `document_name`
+    - `file_name`
+    - `folder_name`
+    - `parent_folder_name`
+    - `relative_path`
+    - `page_number`
     """
     cleaned_query = query.strip()
     if not cleaned_query:

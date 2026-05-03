@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from dataclasses import asdict
+import json
+import logging
 import os
 from pathlib import Path
 from typing import Any
@@ -13,6 +16,7 @@ from pydantic import BaseModel, Field
 
 from agentic_core import AgentState, build_plan_execute_components
 from chat_history.postgres_store import PostgresChatHistoryStore
+from config import get_plan_execute_config
 from observability.tracing import (
     build_langgraph_trace_config,
     configure_mlflow_tracing,
@@ -30,7 +34,67 @@ from utils import (
 SCRIPT_DIR = Path(__file__).resolve().parent
 BACKEND_DIR = SCRIPT_DIR.parent
 load_dotenv(BACKEND_DIR / '.env')
+
+
+def _configure_application_logging() -> None:
+    level_name = os.getenv('AGENTIC_LOG_LEVEL', 'INFO').upper()
+    level = getattr(logging, level_name, logging.INFO)
+    log_dir = BACKEND_DIR / 'logs'
+    log_dir.mkdir(parents=True, exist_ok=True)
+    log_path = Path(os.getenv('AGENTIC_LOG_FILE', str(log_dir / 'agentic.log')))
+
+    formatter = logging.Formatter(
+        '%(asctime)s | %(levelname)s | %(name)s | %(message)s'
+    )
+
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(level)
+    console_handler.setFormatter(formatter)
+
+    file_handler = logging.FileHandler(log_path, encoding='utf-8')
+    file_handler.setLevel(level)
+    file_handler.setFormatter(formatter)
+
+    for logger_name in ('workflow', 'agentic_core'):
+        package_logger = logging.getLogger(logger_name)
+        package_logger.setLevel(level)
+        package_logger.propagate = False
+
+        existing_handler_keys = {
+            (type(handler), getattr(handler, 'baseFilename', None))
+            for handler in package_logger.handlers
+        }
+        desired_handlers = [console_handler, file_handler]
+        for handler in desired_handlers:
+            handler_key = (type(handler), getattr(handler, 'baseFilename', None))
+            if handler_key not in existing_handler_keys:
+                package_logger.addHandler(handler)
+
+
+_configure_application_logging()
 configure_mlflow_tracing()
+
+
+LOGGER = logging.getLogger(__name__)
+PLAN_EXECUTE_CONFIG = get_plan_execute_config()
+
+
+def _workflow_state_snapshot(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        'input_preview': str(state.get('input', ''))[:160],
+        'goal': state.get('goal', {}),
+        'current_step': state.get('execute_track', {}).get('current_step', {}),
+        'control': state.get('control', {}),
+        'plans_count': len(state.get('plans', [])),
+        'execution_log_count': len(state.get('execute_track', {}).get('track', [])),
+        'replan_history_count': len(state.get('replan_history', [])),
+        'has_response': bool(state.get('response')),
+        'last_error': state.get('last_error'),
+    }
+
+
+def _log_workflow_event(event: str, payload: dict[str, Any]) -> None:
+    LOGGER.info('workflow_event %s', json.dumps({'event': event, **payload}, default=str))
 
 
 class CreateSessionRequest(BaseModel):
@@ -65,9 +129,13 @@ class SessionResponse(BaseModel):
 
 
 class AgentTraceResponse(BaseModel):
-    final_plan: list[str]
-    completed_steps: list[dict[str, str]]
-    replan_count: int
+    goal: dict[str, Any]
+    plans: list[dict[str, Any]]
+    completed_steps: list[dict[str, Any]]
+    execute_track: dict[str, Any]
+    control: dict[str, Any]
+    replan_history: list[dict[str, Any]]
+    last_error: str | None = None
 
 
 class ChatResponse(BaseModel):
@@ -77,7 +145,7 @@ class ChatResponse(BaseModel):
 
 
 store = PostgresChatHistoryStore()
-components = build_plan_execute_components(max_replans=int(os.getenv('AGENTIC_MAX_REPLANS', '3')))
+components = build_plan_execute_components(max_replans=PLAN_EXECUTE_CONFIG.flow.max_replans)
 
 
 def build_agentic_graph():
@@ -110,9 +178,11 @@ app.add_middleware(
 def health() -> dict[str, Any]:
     return {
         'status': 'ok',
-        'planner_model': os.getenv('AGENTIC_PLANNER_MODEL', 'gpt-4.1-mini'),
-        'executor_model': os.getenv('AGENTIC_EXECUTOR_MODEL', 'gpt-5-nano'),
-        'replanner_model': os.getenv('AGENTIC_REPLANNER_MODEL', 'gpt-4.1-mini'),
+        'planner_model': PLAN_EXECUTE_CONFIG.planner_model.name,
+        'executor_model': PLAN_EXECUTE_CONFIG.executor_model.name,
+        'replanner_model': PLAN_EXECUTE_CONFIG.replanner_model.name,
+        'reasoning_effort': PLAN_EXECUTE_CONFIG.executor_model.reasoning_effort,
+        'plan_execute_config': asdict(PLAN_EXECUTE_CONFIG),
         **store.health(),
         'has_openai_key': bool(os.getenv('OPENAI_API_KEY')),
         'has_tavily_key': bool(os.getenv('TAVILY_API_KEY')),
@@ -176,41 +246,78 @@ async def chat(session_id: str, request: ChatRequest) -> ChatResponse:
         },
     )
 
+    initial_state = {
+        'input': request.message.strip(),
+        'history': history,
+        'goal': {},
+        'plans': [],
+        'execute_track': {
+            'current_step': {'plan_version': None, 'step_id': None},
+            'track': [],
+        },
+        'control': {
+            'step_count': 0,
+            'replan_time': 0,
+            'status': 'running',
+        },
+        'replan_history': [],
+        'response': '',
+        'last_error': None,
+    }
+    _log_workflow_event(
+        'chat_invoke_start',
+        {
+            'session_id': session_id,
+            'request_text': request.message.strip(),
+            'state': _workflow_state_snapshot(initial_state),
+        },
+    )
+
     try:
         result = await agentic_graph.ainvoke(
-            {
-                'input': request.message.strip(),
-                'history': history,
-                'plan': [],
-                'past_steps': [],
-                'response': '',
-                'last_error': None,
-                'replan_count': 0,
-            },
+            initial_state,
             config=build_langgraph_trace_config(
                 session_id=session_id,
-                recursion_limit=20,
+                recursion_limit=PLAN_EXECUTE_CONFIG.flow.graph_recursion_limit,
                 workflow_name='agentic',
                 external_user_id=record.user.external_user_id,
             ),
         )
     except Exception as exc:
+        _log_workflow_event(
+            'chat_invoke_error',
+            {
+                'session_id': session_id,
+                'error': str(exc),
+            },
+        )
         raise HTTPException(status_code=500, detail=f'Agentic flow failed: {exc}') from exc
+
+    _log_workflow_event(
+        'chat_invoke_done',
+        {
+            'session_id': session_id,
+            'state': _workflow_state_snapshot(result),
+        },
+    )
 
     assistant_text = (result.get('response') or '').strip()
     if not assistant_text:
-        completed_steps = result.get('past_steps', [])
-        if completed_steps:
-            assistant_text = completed_steps[-1][1]
+        execution_logs = result.get('execute_track', {}).get('track', [])
+        if execution_logs:
+            assistant_text = execution_logs[-1].get('output', '')
         else:
             assistant_text = 'I could not produce a final answer.'
 
-    completed_steps = build_completed_steps_payload(result.get('past_steps', []))
+    completed_steps = build_completed_steps_payload(result.get('plans', []))
     assistant_metadata = {
         'source': 'agentic-plan-execute',
-        'final_plan': result.get('plan', []),
+        'goal': result.get('goal', {}),
+        'plans': result.get('plans', []),
         'completed_steps': completed_steps,
-        'replan_count': result.get('replan_count', 0),
+        'execute_track': result.get('execute_track', {}),
+        'control': result.get('control', {}),
+        'replan_history': result.get('replan_history', []),
     }
     if result.get('last_error'):
         assistant_metadata['last_error'] = result['last_error']
@@ -220,7 +327,7 @@ async def chat(session_id: str, request: ChatRequest) -> ChatResponse:
         user_id=None,
         role='assistant',
         content=assistant_text,
-        model_name=os.getenv('AGENTIC_EXECUTOR_MODEL', 'gpt-5-nano'),
+        model_name=PLAN_EXECUTE_CONFIG.executor_model.name,
         metadata=assistant_metadata,
     )
 
@@ -235,14 +342,18 @@ async def chat(session_id: str, request: ChatRequest) -> ChatResponse:
         extra_tags={
             'workflow_mode': 'plan_execute',
             'completed_steps_count': len(completed_steps),
-            'replan_count': result.get('replan_count', 0),
+            'replan_count': result.get('control', {}).get('replan_time', 0),
         },
     )
     flush_traces()
     trace = AgentTraceResponse(
-        final_plan=result.get('plan', []),
+        goal=result.get('goal', {}),
+        plans=result.get('plans', []),
         completed_steps=completed_steps,
-        replan_count=result.get('replan_count', 0),
+        execute_track=result.get('execute_track', {}),
+        control=result.get('control', {}),
+        replan_history=result.get('replan_history', []),
+        last_error=result.get('last_error'),
     )
     return ChatResponse(
         session=SessionResponse(**build_session_response_payload(saved)),

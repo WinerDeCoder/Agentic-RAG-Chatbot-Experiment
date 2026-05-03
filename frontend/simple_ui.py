@@ -8,23 +8,41 @@ import requests
 
 
 API_BASE_URL = os.getenv("SIMPLE_CHAT_API_URL", "http://127.0.0.1:8000").rstrip("/")
-REQUEST_TIMEOUT_SECONDS = float(os.getenv("SIMPLE_CHAT_TIMEOUT_SECONDS", "60"))
+REQUEST_TIMEOUT_SECONDS = float(os.getenv("SIMPLE_CHAT_TIMEOUT_SECONDS", "180"))
+
+
+def _handle_request_error(exc: requests.exceptions.RequestException) -> None:
+    if isinstance(exc, requests.exceptions.ReadTimeout):
+        raise gr.Error(
+            (
+                'The backend is still working, but the UI request timed out before it finished. '
+                f'Current timeout: {REQUEST_TIMEOUT_SECONDS:.0f} seconds. '
+                'Increase SIMPLE_CHAT_TIMEOUT_SECONDS if you want to allow longer agentic runs.'
+            )
+        ) from exc
+    raise gr.Error(f'API request failed: {exc}') from exc
 
 
 def api_get(path: str) -> Any:
-    response = requests.get(f"{API_BASE_URL}{path}", timeout=REQUEST_TIMEOUT_SECONDS)
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.get(f"{API_BASE_URL}{path}", timeout=REQUEST_TIMEOUT_SECONDS)
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as exc:
+        _handle_request_error(exc)
 
 
 def api_post(path: str, payload: dict[str, Any]) -> Any:
-    response = requests.post(
-        f"{API_BASE_URL}{path}",
-        json=payload,
-        timeout=REQUEST_TIMEOUT_SECONDS,
-    )
-    response.raise_for_status()
-    return response.json()
+    try:
+        response = requests.post(
+            f"{API_BASE_URL}{path}",
+            json=payload,
+            timeout=REQUEST_TIMEOUT_SECONDS,
+        )
+        response.raise_for_status()
+        return response.json()
+    except requests.exceptions.RequestException as exc:
+        _handle_request_error(exc)
 
 
 def session_choices(sessions: list[dict[str, Any]]) -> list[tuple[str, str]]:

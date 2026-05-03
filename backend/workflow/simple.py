@@ -14,7 +14,8 @@ from pydantic import BaseModel, Field
 from chat_history.postgres_store import PostgresChatHistoryStore, SessionRecord
 
 
-MODEL_NAME = "gpt-5-nano"
+MODEL_NAME = "gpt-5.4-mini"
+REASONING_EFFORT = os.getenv("AGENTIC_REASONING_EFFORT", "low")
 SCRIPT_DIR = Path(__file__).resolve().parent
 PROJECT_ROOT = SCRIPT_DIR.parent.parent
 load_dotenv(".env")
@@ -107,7 +108,11 @@ def get_openai_client() -> OpenAI:
 
 
 def generate_assistant_reply(history: list[dict[str, Any]]) -> str:
-    response = get_openai_client().responses.create(model=MODEL_NAME, input=build_messages(history))
+    response = get_openai_client().responses.create(
+        model=MODEL_NAME,
+        input=build_messages(history),
+        reasoning={"effort": REASONING_EFFORT},
+    )
     text = getattr(response, "output_text", "") or ""
     if text:
         return text.strip()
@@ -126,6 +131,7 @@ def health() -> dict[str, Any]:
     return {
         "status": "ok",
         "model": MODEL_NAME,
+        "reasoning_effort": REASONING_EFFORT,
         **store.health(),
         "has_openai_key": bool(os.getenv("OPENAI_API_KEY")),
     }
