@@ -1,0 +1,31 @@
+models:
+  planner:
+    name: gpt-5.4-mini
+    temperature: 0.1
+    reasoning_effort: medium
+  executor:
+    name: gpt-5.4-mini
+    temperature: 0.1
+    reasoning_effort: low
+  replanner:
+    name: gpt-5.4-mini
+    temperature: 0.1
+    reasoning_effort: medium
+
+flow:
+  max_replans: 3
+  executor_max_turns: 3
+  graph_recursion_limit: 20
+
+tools:
+  query_qdrant:
+    num_query: 5
+    score_threshold:
+    collection_name:
+  search_web:
+    num_results: 5
+    topic: general
+    search_depth: basic
+    include_answer: true
+    include_raw_content: false
+    include_images: false
